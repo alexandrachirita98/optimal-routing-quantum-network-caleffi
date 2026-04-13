@@ -1,0 +1,6 @@
+sequence-python
+numpy
+matplotlib
+jupyter
+ipykernel
+pytest

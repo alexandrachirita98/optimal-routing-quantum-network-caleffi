@@ -1,0 +1,198 @@
+"""
+OptimalRouting — Algorithms 1-3 from Caleffi (2017).
+
+Reference
+---------
+M. Caleffi, "Optimal Routing for Quantum Networks," IEEE Access, 2017.
+"""
+
+from __future__ import annotations
+import math
+
+from utils.models.physical_params import PhysicalParams
+from utils.models.topology import Topology
+
+
+class OptimalRouting:
+
+    def __init__(self, params: PhysicalParams) -> None:
+        self.params = params
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _P(self, distance_m: float) -> float:
+        """
+        Link entanglement success probability per attempt.
+
+            P_{i,j} = p^2 * nu_o * exp(-d / l0)
+        """
+        p = self.params
+        return p.p() ** 2 * p.nu_o * math.exp(-distance_m / p.l0)
+
+    def _T_c_lm(self, distance_m: float) -> float:
+        """
+        Classical communication delay for a single link [s]  (paper definition).
+
+            T^c_{l,m} = d_{l,m} / (2 * cf)
+        """
+        return distance_m / (2 * self.params.cf)
+
+    def _tau_ij(self, distance_m: float) -> float:
+        """
+        Time from atom-photon entanglement generation to ACK reception [s].
+
+            tau_{i,j} = tau_t + d/(2*cf) + tau_o + T^c_{l,m}
+        """
+        p = self.params
+        return p.tau_t + distance_m / (2 * p.cf) + p.tau_o + self._T_c_lm(distance_m)
+
+    def _T_s(self, distance_m: float) -> float:
+        """
+        Time for one successful entanglement attempt on a link [s].
+
+            T^s_{i,j} = tau_p + max{tau_h, tau_{i,j}}
+            tau_{i,j} = tau_t + d/(2*cf) + tau_o + T^c_{l,m}
+        """
+        p = self.params
+        return p.tau_p + max(p.tau_h, self._tau_ij(distance_m))
+
+    def _T_f(self, distance_m: float) -> float:
+        """
+        Time for one failed entanglement attempt on a link [s].
+
+            T^f_{i,j} = tau_p + max{tau_h, tau_{i,j}, tau_d}
+        """
+        p = self.params
+        return p.tau_p + max(p.tau_h, self._tau_ij(distance_m), p.tau_d)
+
+    def _T_link(self, distance_m: float) -> float:
+        """
+        Average time to achieve link entanglement, including failed attempts [s].
+
+            T_{i,j} = (p_bar * T^f + p * T^s) / p
+        """
+        p   = self._P(distance_m)
+        T_s = self._T_s(distance_m)
+        T_f = self._T_f(distance_m)
+        return ((1 - p) * T_f + p * T_s) / p
+
+    def _T_c(self, route: list[str], topology: Topology) -> float:
+        """
+        Classical communication delay for a sub-route [s]  (Algorithm 2).
+
+            T^c_{r_{a,k}} = sum_{e_{l,m} in r_{a,k}} T^c_{l,m}
+        """
+        return sum(
+            self._T_c_lm(topology.dist[(l, m)])
+            for l, m in zip(route, route[1:])
+        )
+
+    # ── Public algorithms ─────────────────────────────────────────────────────
+
+    def xi(self, route: list[str], topology: Topology) -> float:
+        """
+        End-to-end entanglement rate for a route (Theorem 1, Eq. 8).
+
+            xi(T^ch) = 0           if T^ch < rec_tau(route)
+                       1 / rec_T   otherwise
+
+        Parameters
+        ----------
+        route    : ordered node list, e.g. ["r1", "r2", "r3"]
+        topology : network graph
+
+        Returns
+        -------
+        Entanglement rate [pairs / s].  0 if route is infeasible.
+        """
+        n = len(route)
+        if n == 2:
+            l, m = route[0], route[1]
+            d = topology.dist[(l, m)]
+            if self._tau_ij(d) <= self.params.t_ch:
+                return 1.0 / self._T_link(d)
+            return 0.0
+        else:
+            tau_r = self.rec_tau(route, topology)
+            min_diff = min(
+                self._T_s(topology.dist[(l, m)]) - self._tau_ij(topology.dist[(l, m)])
+                for l, m in zip(route, route[1:])
+            )
+            if tau_r - min_diff <= self.params.t_ch:
+                return 1.0 / self.rec_T(route, topology)
+            return 0.0
+
+        
+
+    def rec_T(self, route: list[str], topology: Topology) -> float:
+        """
+        Recursive end-to-end entanglement generation time (Algorithm 2,
+        lines 1-13).
+
+        Base case  (n = 2):  T_r = T_ij
+        Recursive  (n > 2):  T_r = (max(rec_T(left), rec_T(right)) + tau_a + T_c_tilde) / nu_a
+
+        Parameters
+        ----------
+        route    : ordered node list
+        topology : network graph
+
+        Returns
+        -------
+        Average time to generate end-to-end entanglement [s].
+        """
+        n = len(route)
+        if n == 2:
+            return self._T_link(topology.dist[(route[0], route[1])])
+        else:
+            k = n // 2
+            t_left = route[:k + 1]
+            t_right = route[k:]
+            t_tilde = max(self.rec_T(t_left, topology), self.rec_T(t_right, topology))
+            t_c_tilde = max(self._T_c(t_left, topology), self._T_c(t_right, topology))
+            return (t_tilde + self.params.tau_a + t_c_tilde) / self.params.nu_a
+
+    def rec_tau(self, route: list[str], topology: Topology) -> float:
+        """
+        Recursive minimum coherence time required by the route (Algorithm 2,
+        lines 14-26).
+
+        Base case  (n = 2):  tau_r = T^s_ij
+        Recursive  (n > 2):  tau_r = max(rec_tau(left), rec_tau(right)) + tau_a + T_c_tilde
+
+        Parameters
+        ----------
+        route    : ordered node list
+        topology : network graph
+
+        Returns
+        -------
+        Minimum coherence time t_ch needed to make the route feasible [s].
+        """
+        n = len(route)
+        if n == 2:
+            return self._T_s(topology.dist[(route[0], route[1])])
+        else:
+            k = n // 2
+            tau_left = route[:k + 1]
+            tau_right = route[k:]
+            tau_tilde = max(self.rec_tau(tau_left, topology), self.rec_tau(tau_right, topology))
+            t_c_tilde = max(self._T_c(tau_left, topology), self._T_c(tau_right, topology))
+            return tau_tilde + self.params.tau_a + t_c_tilde
+
+    def optimal_path(self, topology: Topology) -> dict[tuple[str, str], list[str]]:
+        """
+        Find the route with the highest xi between every node pair (Algorithm 3).
+
+        Enumerates all simple paths (xi is monotone but not isotone, so
+        Dijkstra is not applicable).
+
+        Parameters
+        ----------
+        topology : network graph
+
+        Returns
+        -------
+        Dict mapping (src, dst) -> optimal ordered node list.
+        """
+        
