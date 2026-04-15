@@ -1,0 +1,9 @@
+{
+    "description": "Linear 4-node chain. Tests recursive splitting with 3 hops.",
+    "nodes": ["r1", "r2", "r3", "r4"],
+    "edges": [
+        ["r1", "r2", 20000],
+        ["r2", "r3", 20000],
+        ["r3", "r4", 20000]
+    ]
+}

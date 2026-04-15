@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -33,3 +34,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Docs
+docs/*.pdf

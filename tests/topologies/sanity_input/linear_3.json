@@ -1,0 +1,8 @@
+{
+    "description": "Linear 3-node chain. Only path from r1 to r3 is through r2.",
+    "nodes": ["r1", "r2", "r3"],
+    "edges": [
+        ["r1", "r2", 20000],
+        ["r2", "r3", 20000]
+    ]
+}

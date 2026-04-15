@@ -1,0 +1,10 @@
+{
+    "description": "Two paths from r1 to r4: long direct link (80km) vs 3-hop short links (3x20km). Tests that optimal_path picks the multi-hop route.",
+    "nodes": ["r1", "r2", "r3", "r4"],
+    "edges": [
+        ["r1", "r2", 20000],
+        ["r2", "r3", 20000],
+        ["r3", "r4", 20000],
+        ["r1", "r4", 80000]
+    ]
+}

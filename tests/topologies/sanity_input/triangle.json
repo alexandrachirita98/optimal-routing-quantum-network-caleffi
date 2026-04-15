@@ -1,0 +1,9 @@
+{
+    "description": "Fully connected triangle. Direct link should always beat the 2-hop route.",
+    "nodes": ["r1", "r2", "r3"],
+    "edges": [
+        ["r1", "r2", 20000],
+        ["r2", "r3", 20000],
+        ["r1", "r3", 20000]
+    ]
+}

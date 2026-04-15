@@ -195,4 +195,40 @@ class OptimalRouting:
         -------
         Dict mapping (src, dst) -> optimal ordered node list.
         """
-        
+        # w[i,j] = 0 for all v_i, v_j in V
+
+        w = { (vi, vj): 0.0
+            for vi in topology.nodes
+            for vj in topology.nodes
+        }
+        R_i_j = {}
+        r_star_i_j = {}
+
+        for n1, n2, _ in topology.edges:
+            route = [n1, n2]
+            R_i_j[(n1, n2)] = [route]        # R(i,j).append(e_ij)
+            r_star_i_j[(n1, n2)] = route                # r*_ij = e_ij
+            w[(n1, n2)] = self.xi(route, topology) # w_ij = Xi(e_ij, D)
+            # And add incerse route
+            route_inv = [n2, n1]
+            R_i_j[(n2, n1)] = [route_inv]
+            r_star_i_j[(n2, n1)] = route_inv
+            w[(n2, n1)] = self.xi(route_inv, topology)
+
+        for k in topology.nodes:
+            for i in topology.nodes:
+                for j in topology.nodes:
+                    for p1 in R_i_j.get((i, k), []):
+                        for p2 in R_i_j.get((k, j), []):
+                            shared = set(p1) & set(p2) - {k}
+                            if not shared:  # !(V(p1) & V(p2) & V\{k})
+                                r = p1 + p2[1:]  # drop the leading k from p2 to avoid duplicate
+                                if (i, j) not in R_i_j:
+                                    R_i_j[(i, j)] = []
+                                R_i_j[(i, j)].append(r)
+                                w_r = self.xi(r, topology)
+                                # If new weight is better, update the optimal route and weight
+                                if w_r > w[(i, j)]:
+                                    r_star_i_j[(i, j)] = r
+                                    w[(i, j)] = w_r
+        return {(vi, vj): (r_star_i_j[(vi, vj)], w[(vi, vj)]) for vi in topology.nodes for vj in topology.nodes if (vi, vj) in r_star_i_j}
