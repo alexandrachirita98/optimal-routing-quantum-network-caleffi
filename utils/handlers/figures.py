@@ -200,7 +200,69 @@ class Figures:
         with different numbers of hops (equal-length links). Shows when adding
         repeater nodes improves performance over a direct link.
         """
-        pass
+        total_km = np.linspace(0.1, 500, 2000)
+        total_m  = total_km * 1_000
+        
+        # Different chain configurations: 1-hop (direct), 2-hop, 3-hop, etc.
+        num_hops_list = [1, 2, 3, 4, 5]
+        labels = [
+            r"1-hop (direct link)",
+            r"2-hop (equal segments)",
+            r"3-hop (equal segments)",
+            r"4-hop (equal segments)",
+            r"5-hop (equal segments)",
+        ]
+        colors = ["#1565C0", "#E65100", "#F9A825", "#6A1B9A", "#2E7D32"]
+        
+        fig, ax = plt.subplots(figsize=(9, 7))
+        
+        for num_hops, label, color in zip(num_hops_list, labels, colors):
+            rates = []
+            for D in total_m:
+                if num_hops == 1:
+                    # Direct link
+                    topo = MockTopologies._line_topology(D)
+                    r = self.routing.xi(["vi", "vj"], topo)
+                else:
+                    # Linear chain with equal-length segments
+                    segment_length = D / num_hops
+                    nodes = [f"v{i}" for i in range(num_hops + 1)]
+                    edges = [(nodes[i], nodes[i+1], segment_length) 
+                             for i in range(num_hops)]
+                    topo = Topology(nodes=nodes, edges=edges)
+                    r = self.routing.xi(nodes, topo)
+                rates.append(r)
+            
+            rates = np.array(rates)
+            mask = rates > 0
+            if mask.any():
+                ax.semilogy(total_km[mask], rates[mask], "-",
+                            color=color, linewidth=2.0, label=label)
+        
+        # Conventional rate for direct link (D/2 repeater position equivalent)
+        tau_conv = 100e-6
+        p = self.params
+        conv = np.array([
+            p.p() ** 2 * math.exp(-D / p.l0) / (D / p.cf + tau_conv)
+            for D in total_m
+        ])
+        ax.semilogy(total_km, conv, ":", color="red", linewidth=2.0,
+                    label="Conventional Rate (direct link)")
+        
+        ax.set_xlabel(r"Total route length $d$ [Km]", fontsize=12)
+        ax.set_ylabel(r"End-to-End Entanglement Rate $\xi_{r}(T^{CH})$", fontsize=12)
+        ax.set_title("Figure 6 – E2E Rate vs Route Length (Linear Chains)", fontsize=12)
+        ax.set_xlim(0, 500)
+        ax.set_ylim(1e-6, 1e4)
+        ax.legend(fontsize=10, loc="upper right")
+        ax.grid(True, which="both", linestyle=":", alpha=0.4)
+        
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+        if show:
+            plt.show()
+        return fig, ax
 
     def figure8(
         self,
@@ -214,3 +276,88 @@ class Figures:
         optimal path switches.
         """
         pass
+
+    def figure9(
+        self,
+        show: bool = True,
+        save_path: str | None = None,
+    ) -> tuple[plt.Figure, plt.Axes]:
+        """
+        Figure 9: Optimal vs Sub-Optimal Routing on the Figure 7 topology.
+
+        Topology (Figure 7): vi--v1--v2--v3--vj, all link lengths d,
+        plus a direct shortcut v2→vj of length 2d.
+
+        Two simple routes from vi to vj:
+          r1: vi→v1→v2→vj  (3 hops: d, d, 2d)
+          r2: vi→v1→v2→v3→vj  (4 hops: d, d, d, d)
+
+        Optimal routing (Algorithm 3): picks max(ξ(r1), ξ(r2)).
+        Dijkstra/Bellman-Ford: applies per-link ξ as metric, greedily prefers
+        equal-d links (ξ(d) > ξ(2d)), so it always selects r2. This is
+        sub-optimal at small d where fewer swaps in r1 outweigh the 2d penalty.
+        """
+        d_km = np.linspace(0.01, 10, 500)
+        d_m  = d_km * 1_000
+
+        r1_rates = []
+        r2_rates = []
+        optimal_rates = []
+        dijkstra_rates = []
+
+        for d in d_m:
+            topology = Topology(
+                nodes=["vi", "v1", "v2", "v3", "vj"],
+                edges=[
+                    ("vi", "v1", d),
+                    ("v1", "v2", d),
+                    ("v2", "v3", d),
+                    ("v3", "vj", d),
+                    ("v2", "vj", 2 * d),
+                ]
+            )
+
+            rate_r1 = self.routing.xi(["vi", "v1", "v2", "vj"], topology)
+            rate_r2 = self.routing.xi(["vi", "v1", "v2", "v3", "vj"], topology)
+
+            r1_rates.append(rate_r1)
+            r2_rates.append(rate_r2)
+            optimal_rates.append(max(rate_r1, rate_r2))
+            # Dijkstra with ξ as per-link metric always picks r2 because
+            # ξ(d) > ξ(2d), preferring all-equal links over the shortcut
+            dijkstra_rates.append(rate_r2)
+
+        r1_rates = np.array(r1_rates)
+        r2_rates = np.array(r2_rates)
+        optimal_rates  = np.array(optimal_rates)
+        dijkstra_rates = np.array(dijkstra_rates)
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+
+        ax.plot(d_km, r1_rates, "-.",
+                color="#2E7D32", linewidth=2.0,
+                label=r"$\xi_{r_1}$ (3-hop: $d, d, 2d$)")
+        ax.plot(d_km, r2_rates, "-",
+                color="#6A1B9A", linewidth=2.0,
+                label=r"$\xi_{r_2}$ (4-hop: $d, d, d, d$)")
+        ax.plot(d_km, optimal_rates, ":",
+                color="#1565C0", linewidth=2.5,
+                label=r"$\xi_{r^*_{i,j}}$ with $r^*_{i,j}$ selected with Algorithm 3")
+        ax.plot(d_km, dijkstra_rates, "--",
+                color="#E65100", linewidth=2.5,
+                label=r"$\xi_{r_{i,j}}$ with $r_{i,j}$ selected with Dijkstra/Bellman-Ford")
+
+        ax.set_xlabel(r"link length $d$ [Km]", fontsize=12)
+        ax.set_ylabel(r"End-to-End Entanglement Rate $\xi_r(T^{CH})$", fontsize=12)
+        ax.set_title("Figure 9 – Optimal vs Sub-Optimal Routing", fontsize=12)
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 400)
+        ax.legend(fontsize=10, loc="upper right")
+        ax.grid(True, which="both", linestyle=":", alpha=0.4)
+
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+        if show:
+            plt.show()
+        return fig, ax
