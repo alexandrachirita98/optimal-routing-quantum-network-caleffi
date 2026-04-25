@@ -141,13 +141,13 @@ class OptimalRouting:
         -------
         Average time to generate end-to-end entanglement [s].
         """
-        n = len(route)
-        if n == 2:
+        n = len(route) - 1
+        if n == 1:
             return self._T_link(topology.dist[(route[0], route[1])])
         else:
-            k = n // 2
-            t_left = route[:k + 1]
-            t_right = route[k:]
+            k = math.ceil((n + 1) / 2)
+            t_left = route[:k]
+            t_right = route[k - 1:]
             t_tilde = max(self.rec_T(t_left, topology), self.rec_T(t_right, topology))
             t_c_tilde = max(self._T_c(t_left, topology), self._T_c(t_right, topology))
             return (t_tilde + self.params.tau_a + t_c_tilde) / self.params.nu_a
@@ -169,13 +169,13 @@ class OptimalRouting:
         -------
         Minimum coherence time t_ch needed to make the route feasible [s].
         """
-        n = len(route)
-        if n == 2:
+        n = len(route) - 1
+        if n == 1:
             return self._T_s(topology.dist[(route[0], route[1])])
         else:
-            k = n // 2
-            tau_left = route[:k + 1]
-            tau_right = route[k:]
+            k = math.ceil((n + 1) / 2)
+            tau_left = route[:k]
+            tau_right = route[k - 1:]
             tau_tilde = max(self.rec_tau(tau_left, topology), self.rec_tau(tau_right, topology))
             t_c_tilde = max(self._T_c(tau_left, topology), self._T_c(tau_right, topology))
             return tau_tilde + self.params.tau_a + t_c_tilde

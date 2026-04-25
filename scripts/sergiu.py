@@ -7,4 +7,4 @@ from utils.models.optimal_routing import OptimalRouting
 from utils.models.topology import Topology
 
 figs = Figures()
-figs.figure9()
+figs.figure9_paper_faithful()
