@@ -38,8 +38,8 @@ class PhysicalParams:
     t_ch: float   # coherence time  [s]
 
     def p(self) -> float:
-        """Local entanglement generation probability per attempt (Eq. 1):  p = sqrt(p_ht · ν_h · ν_t)."""
-        return math.sqrt(self.p_ht * self.nu_h * self.nu_t)
+        """Local entanglement generation probability per attempt:  p = √(p_ht · ν_h · ν_t)."""
+        return self.p_ht * self.nu_h * self.nu_t
 
     def attempt_frequency(self) -> float:
         """Maximum memory excitation rate [Hz]:  1 / (τ_p + τ_h + τ_t + τ_d)."""

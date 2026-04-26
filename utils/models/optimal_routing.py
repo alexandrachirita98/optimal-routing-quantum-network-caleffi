@@ -27,7 +27,8 @@ class OptimalRouting:
             P_{i,j} = p^2 * nu_o * exp(-d / l0)
         """
         p = self.params
-        return p.p() ** 2 * p.nu_o * math.exp(-distance_m / p.l0)
+        # p = p.p_ht * p.nu_h * p.nu_t
+        return 0.5 * p.p() ** 2 * p.nu_o * math.exp(-distance_m / p.l0)
 
     def _T_c_lm(self, distance_m: float) -> float:
         """
@@ -37,16 +38,16 @@ class OptimalRouting:
         """
         return distance_m / (2 * self.params.cf)
 
-    def _tau_ij(self, distance_m: float) -> float:
+    def _tau_lm(self, distance_m: float) -> float:
         """
         Time from atom-photon entanglement generation to ACK reception [s].
 
-            tau_{i,j} = tau_t + d/(2*cf) + tau_o + T^c_{l,m}
+            tau_{l,m} = tau_t + d/(2*cf) + tau_o + T^c_{l,m}
         """
         p = self.params
         return p.tau_t + distance_m / (2 * p.cf) + p.tau_o + self._T_c_lm(distance_m)
 
-    def _T_s(self, distance_m: float) -> float:
+    def _T_s_lm(self, distance_m: float) -> float:
         """
         Time for one successful entanglement attempt on a link [s].
 
@@ -54,26 +55,26 @@ class OptimalRouting:
             tau_{i,j} = tau_t + d/(2*cf) + tau_o + T^c_{l,m}
         """
         p = self.params
-        return p.tau_p + max(p.tau_h, self._tau_ij(distance_m))
+        return p.tau_p + max(p.tau_h, self._tau_lm(distance_m))
 
-    def _T_f(self, distance_m: float) -> float:
+    def _T_f_lm(self, distance_m: float) -> float:
         """
         Time for one failed entanglement attempt on a link [s].
 
             T^f_{i,j} = tau_p + max{tau_h, tau_{i,j}, tau_d}
         """
         p = self.params
-        return p.tau_p + max(p.tau_h, self._tau_ij(distance_m), p.tau_d)
+        return p.tau_p + max(p.tau_h, self._tau_lm(distance_m), p.tau_d)
 
-    def _T_link(self, distance_m: float) -> float:
+    def _T_lm(self, distance_m: float) -> float:
         """
         Average time to achieve link entanglement, including failed attempts [s].
 
             T_{i,j} = (p_bar * T^f + p * T^s) / p
         """
-        p   = self._P(distance_m)
-        T_s = self._T_s(distance_m)
-        T_f = self._T_f(distance_m)
+        p = self._P(distance_m)
+        T_s = self._T_s_lm(distance_m)
+        T_f = self._T_f_lm(distance_m)
         return ((1 - p) * T_f + p * T_s) / p
 
     def _T_c(self, route: list[str], topology: Topology) -> float:
@@ -87,6 +88,19 @@ class OptimalRouting:
             for l, m in zip(route, route[1:])
         )
 
+    def _T_c_range(self, route: list[str], topology: Topology, a: int, b: int) -> float:
+        """
+        Classical communication delay over the sub-route route[a..b] [s].
+
+            T^c_{r_{a,b}} = sum_{i=a}^{b-1} T^c_{route[i], route[i+1]}
+
+        Equivalent to `_T_c(route[a:b+1], topology)` but avoids slicing.
+        """
+        return sum(
+            self._T_c_lm(topology.dist[(route[i], route[i+1])])
+            for i in range(a, b)
+        )
+    
     # ── Public algorithms ─────────────────────────────────────────────────────
 
     def xi(self, route: list[str], topology: Topology) -> float:
@@ -105,26 +119,35 @@ class OptimalRouting:
         -------
         Entanglement rate [pairs / s].  0 if route is infeasible.
         """
-        n = len(route)
-        if n == 2:
+        n = len(route) - 1
+        if n == 1:
             l, m = route[0], route[1]
             d = topology.dist[(l, m)]
-            if self._tau_ij(d) <= self.params.t_ch:
-                return 1.0 / self._T_link(d)
+            if self._tau_lm(d) <= self.params.t_ch:
+                return 1.0 / self._T_lm(d)
             return 0.0
         else:
-            tau_r = self.rec_tau(route, topology)
-            min_diff = min(
-                self._T_s(topology.dist[(l, m)]) - self._tau_ij(topology.dist[(l, m)])
+            k = math.ceil((n + 1) / 2)
+            left = route[:k]
+            right = route[k-1:]
+            T_r_i_k = self.rec_T(left, topology)
+            T_r_k_j = self.rec_T(right, topology)
+            T_tilde = max(T_r_i_k, T_r_k_j)
+            T_c_tilde = max(self._T_c(left, topology), self._T_c(right, topology))
+            tau_r_i_k = self.rec_tau(left, topology)
+            tau_r_k_j = self.rec_tau(right, topology)
+            tau_tilde = max(tau_r_i_k, tau_r_k_j)
+            tau_r_i_j = tau_tilde + self.params.tau_a + T_c_tilde
+            min_T_s_minus_tau = min(
+                self._T_s_lm(topology.dist[(l, m)]) - self._tau_lm(topology.dist[(l, m)])
                 for l, m in zip(route, route[1:])
             )
-            if tau_r - min_diff <= self.params.t_ch:
-                return 1.0 / self.rec_T(route, topology)
+            if tau_r_i_j - min_T_s_minus_tau <= self.params.t_ch:
+                return 1.0 / ((T_tilde + self.params.tau_a + T_c_tilde) / self.params.nu_a)
             return 0.0
 
-        
-
-    def rec_T(self, route: list[str], topology: Topology) -> float:
+    def rec_T(self, route: list[str], topology: Topology,
+          a: int | None = None, b: int | None = None) -> float:
         """
         Recursive end-to-end entanglement generation time (Algorithm 2,
         lines 1-13).
@@ -141,18 +164,23 @@ class OptimalRouting:
         -------
         Average time to generate end-to-end entanglement [s].
         """
-        n = len(route) - 1
-        if n == 1:
-            return self._T_link(topology.dist[(route[0], route[1])])
-        else:
-            k = math.ceil((n + 1) / 2)
-            t_left = route[:k]
-            t_right = route[k - 1:]
-            t_tilde = max(self.rec_T(t_left, topology), self.rec_T(t_right, topology))
-            t_c_tilde = max(self._T_c(t_left, topology), self._T_c(t_right, topology))
-            return (t_tilde + self.params.tau_a + t_c_tilde) / self.params.nu_a
+        if a is None: a = 0
+        if b is None: b = len(route) - 1
 
-    def rec_tau(self, route: list[str], topology: Topology) -> float:
+        if b - a == 1:                                       # caz de bază: o singură muchie
+            return self._T_lm(topology.dist[(route[a], route[b])])
+
+        k = math.ceil((a + b) / 2)                           # ⌈(a+b)/2⌉
+
+        T_r_a_k   = self.rec_T(route, topology, a, k)        # recT(r_{a,k}, …)
+        T_r_k_b   = self.rec_T(route, topology, k, b)        # recT(r_{k,b}, …)
+        t_tilde   = max(T_r_a_k, T_r_k_b)
+        t_c_tilde = max(self._T_c_range(route, topology, a, k),
+                        self._T_c_range(route, topology, k, b))
+        return (t_tilde + self.params.tau_a + t_c_tilde) / self.params.nu_a
+
+    def rec_tau(self, route: list[str], topology: Topology, 
+            a: int | None = None, b: int | None = None) -> float:       
         """
         Recursive minimum coherence time required by the route (Algorithm 2,
         lines 14-26).
@@ -169,16 +197,20 @@ class OptimalRouting:
         -------
         Minimum coherence time t_ch needed to make the route feasible [s].
         """
-        n = len(route) - 1
-        if n == 1:
-            return self._T_s(topology.dist[(route[0], route[1])])
-        else:
-            k = math.ceil((n + 1) / 2)
-            tau_left = route[:k]
-            tau_right = route[k - 1:]
-            tau_tilde = max(self.rec_tau(tau_left, topology), self.rec_tau(tau_right, topology))
-            t_c_tilde = max(self._T_c(tau_left, topology), self._T_c(tau_right, topology))
-            return tau_tilde + self.params.tau_a + t_c_tilde
+        if a is None: a = 0
+        if b is None: b = len(route) - 1
+
+        if b - a == 1:                                       # caz de bază: o singură muchie
+            return self._T_s_lm(topology.dist[(route[a], route[b])])
+
+        k = math.ceil((a + b) / 2)                           # ⌈(a+b)/2⌉
+
+        tau_r_a_k = self.rec_tau(route, topology, a, k)      # recTau(r_{a,k}, …)
+        tau_r_k_b = self.rec_tau(route, topology, k, b)      # recTau(r_{k,b}, …)
+        tau_tilde = max(tau_r_a_k, tau_r_k_b)
+        T_c_tilde = max(self._T_c_range(route, topology, a, k),
+                        self._T_c_range(route, topology, k, b))
+        return tau_tilde + self.params.tau_a + T_c_tilde
 
     def optimal_path(self, topology: Topology) -> dict[tuple[str, str], list[str]]:
         """
