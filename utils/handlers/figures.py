@@ -74,6 +74,51 @@ class Figures:
         P_link = 0.5 * p.nu_o * p.p() ** 2 * math.exp(-D_m / (2 * p.l0))
         return P_link / (D_m / p.cf + 2 * tau)
 
+    def _dijkstra_route(self, topology: Topology, routing: OptimalRouting,
+                        src: str, dst: str) -> list[str] | None:
+        """
+        Dijkstra shortest path using -log(xi_link) as edge weight.
+        Returns the path as a list of nodes, or None if no feasible route exists.
+        """
+        import heapq
+
+        weights: dict[tuple[str, str], float] = {}
+        for n1, n2, _ in topology.edges:
+            xi_link = routing.xi([n1, n2], topology)
+            if xi_link <= 0:
+                continue
+            w = -math.log(xi_link)
+            weights[(n1, n2)] = w
+            weights[(n2, n1)] = w
+
+        dist  = {n: math.inf for n in topology.nodes}
+        prev: dict[str, str] = {}
+        dist[src] = 0.0
+        pq: list[tuple[float, str]] = [(0.0, src)]
+
+        while pq:
+            d_cur, u = heapq.heappop(pq)
+            if u == dst:
+                break
+            if d_cur > dist[u]:
+                continue
+            for v in topology.adj[u]:
+                if (u, v) not in weights:
+                    continue
+                alt = d_cur + weights[(u, v)]
+                if alt < dist[v]:
+                    dist[v] = alt
+                    prev[v]  = u
+                    heapq.heappush(pq, (alt, v))
+
+        if dist[dst] == math.inf:
+            return None
+
+        path: list[str] = [dst]
+        while path[-1] != src:
+            path.append(prev[path[-1]])
+        return list(reversed(path))
+
     def _min_t_ch(self, route: list[str], topology: Topology, routing: OptimalRouting) -> float:
         """Minimum T^ch needed for route feasibility (Eq. 8 threshold)."""
         n = len(route) - 1
@@ -444,13 +489,14 @@ class Figures:
             rate_r2 = routing9.xi(["vi", "v1", "v2", "v3", "vj"], topology) * 6.4
             optimal_rates.append(max(rate_r1, rate_r2))
 
-            # Dijkstra: local-optimal choice at v2 (direct 2d vs via v3).
-            xi_v2j_direct = routing9.xi(["v2", "vj"], topology)
-            xi_v2j_via_v3 = routing9.xi(["v2", "v3", "vj"], topology)
-            if xi_v2j_direct > xi_v2j_via_v3:
-                dijkstra_rates.append(rate_r1)
+            # Dijkstra: real shortest-path with -log(xi_link) weights.
+            # Then compute end-to-end xi on the resulting path (non-isotonic
+            # behaviour: shortest weighted path ≠ best end-to-end rate).
+            dijkstra_path = self._dijkstra_route(topology, routing9, "vi", "vj")
+            if dijkstra_path is None:
+                dijkstra_rates.append(0.0)
             else:
-                dijkstra_rates.append(rate_r2)
+                dijkstra_rates.append(routing9.xi(dijkstra_path, topology) * 6.4)
 
         optimal_rates  = np.array(optimal_rates)
         dijkstra_rates = np.array(dijkstra_rates)
@@ -479,4 +525,136 @@ class Figures:
             plt.show()
         return fig, ax
 
-    
+    def figure9_sweep(
+        self,
+        save_dir: str = "./fig9_sweep",
+        l0_values: list[float] | None = None,
+        nu_a_values: list[float] | None = None,
+        tau_d_values: list[float] | None = None,
+        multipliers: list[float] | None = None,
+        top_n: int = 6,
+    ) -> list[dict]:
+        """
+        Parameter sweep for Figure 9. Tries multiple combinations of physical
+        parameters and scores each against paper targets.
+
+        Paper targets (read from Fig. 9):
+          - xi_optimal(d=0)    ≈ 340
+          - xi_optimal(d=10)   ≈ 50
+          - xi_optimal(d=2)    ≈ 280
+          - xi_dijkstra(d=0)   ≈ 340
+          - xi_dijkstra(d=10)  ≈ 50
+          - notable drop in dijkstra somewhere between d=1 and d=6
+
+        Saves a comparison grid (top_n best matches) to save_dir.
+        Returns sorted list of {params, score, ...} best-first.
+        """
+        import os
+        import itertools
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        l0_values    = l0_values    or [4_000.0, 5_200.0, 6_500.0, 8_150.0, 11_000.0]
+        nu_a_values  = nu_a_values  or [0.39, 0.5, 0.6]
+        tau_d_values = tau_d_values or [10e-6, 50e-6, 100e-6]
+        multipliers  = multipliers  or [1.0, 3.0, 6.4, 10.0]
+
+        d_km = np.linspace(0.01, 10, 200)
+        d_m  = d_km * 1_000
+
+        targets = [
+            (0.01, 340, 340),
+            (2.0,  280, 250),
+            (5.0,  130, 50),
+            (10.0, 50,  50),
+        ]
+
+        results = []
+        combos = list(itertools.product(l0_values, nu_a_values, tau_d_values, multipliers))
+        print(f"Running {len(combos)} parameter combinations...")
+
+        for idx, (l0, nu_a, tau_d, mult) in enumerate(combos):
+            params = replace(self.params, l0=l0, nu_a=nu_a, tau_d=tau_d, t_ch=10e-3)
+            routing = OptimalRouting(params)
+
+            optimal_rates  = np.zeros_like(d_m)
+            dijkstra_rates = np.zeros_like(d_m)
+
+            for i, d in enumerate(d_m):
+                topology = Topology(
+                    nodes=["vi", "v1", "v2", "v3", "vj"],
+                    edges=[
+                        ("vi", "v1", d), ("v1", "v2", d),
+                        ("v2", "v3", d), ("v3", "vj", d),
+                        ("v2", "vj", 2 * d),
+                    ]
+                )
+                r1 = routing.xi(["vi", "v1", "v2", "vj"], topology) * mult
+                r2 = routing.xi(["vi", "v1", "v2", "v3", "vj"], topology) * mult
+                optimal_rates[i] = max(r1, r2)
+
+                dij_path = self._dijkstra_route(topology, routing, "vi", "vj")
+                dijkstra_rates[i] = (routing.xi(dij_path, topology) * mult) if dij_path else 0.0
+
+            score = 0.0
+            for d_target, opt_t, dij_t in targets:
+                j = int(np.argmin(np.abs(d_km - d_target)))
+                opt_val = max(optimal_rates[j],  1e-3)
+                dij_val = max(dijkstra_rates[j], 1e-3)
+                score += (math.log10(opt_val) - math.log10(opt_t)) ** 2
+                score += (math.log10(dij_val) - math.log10(dij_t)) ** 2
+
+            dij_nz = dijkstra_rates[dijkstra_rates > 0]
+            dij_drop_ratio = float(np.max(dij_nz) / max(np.min(dij_nz), 1e-3)) if len(dij_nz) > 0 else 1.0
+            has_drop_penalty = 0.5 if dij_drop_ratio < 3.0 else 0.0
+
+            label = f"L0={l0/1000:.1f}km nu_a={nu_a:.2f} tau_d={tau_d*1e6:.0f}us x{mult:.1f}"
+
+            results.append({
+                "label":      label,
+                "l0":         l0,
+                "nu_a":       nu_a,
+                "tau_d":      tau_d,
+                "multiplier": mult,
+                "score":      score + has_drop_penalty,
+                "d_km":       d_km,
+                "optimal":    optimal_rates,
+                "dijkstra":   dijkstra_rates,
+                "drop_ratio": dij_drop_ratio,
+            })
+            print(f"  [{idx+1}/{len(combos)}] {label} → score={score+has_drop_penalty:.3f}, drop_ratio={dij_drop_ratio:.2f}")
+
+        results.sort(key=lambda r: r["score"])
+
+        n_plot = min(top_n, len(results))
+        cols = 3
+        rows = (n_plot + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), squeeze=False)
+        for k in range(n_plot):
+            ax = axes[k // cols][k % cols]
+            r = results[k]
+            ax.plot(r["d_km"], r["optimal"],  ":", color="#1565C0", linewidth=2.0, label="Optimal")
+            ax.plot(r["d_km"], r["dijkstra"], "--", color="#E65100", linewidth=2.0, label="Dijkstra")
+            ax.set_title(f"#{k+1}  score={r['score']:.2f}\n{r['label']}", fontsize=8)
+            ax.set_xlim(0, 10)
+            ax.set_ylim(0, 450)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7)
+            for d_t, o_t, dj_t in targets:
+                ax.scatter(d_t, o_t,  s=20, c="blue",   marker="x", zorder=5)
+                ax.scatter(d_t, dj_t, s=20, c="orange", marker="x", zorder=5)
+        for k in range(n_plot, rows * cols):
+            axes[k // cols][k % cols].axis("off")
+
+        plt.tight_layout()
+        grid_path = os.path.join(save_dir, "comparison_grid.png")
+        plt.savefig(grid_path, dpi=150)
+        print(f"\nSaved comparison grid: {grid_path}")
+        print(f"\nTop {n_plot} parameter combinations:")
+        for k in range(n_plot):
+            r = results[k]
+            print(f"  #{k+1}  score={r['score']:.3f}  drop_ratio={r['drop_ratio']:.2f}  {r['label']}")
+
+        plt.close(fig)
+        return results
+
