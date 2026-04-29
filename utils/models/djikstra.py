@@ -106,6 +106,29 @@ class DijkstraRouting:
         
         return path
     
+    def entanglement_weighted_path(self, topology: Topology, start_node: str, target_node: str) -> list[str]:
+        """
+        Paper-style Dijkstra: edge weight = 1/xi_link.
+
+        Demonstrates the non-isotonicity argument from Caleffi (2017): locally
+        cheapest edges (highest per-link xi) need not yield the best end-to-end
+        entanglement rate. Weights are always positive, so Dijkstra terminates
+        even when the topology contains cycles.
+        """
+        weighted_edges = []
+        for n1, n2, _d in topology.edges:
+            xi_link = self.optimal_routing.xi([n1, n2], topology)
+            w = 1.0 / xi_link if xi_link > 0 else math.inf
+            weighted_edges.append((n1, n2, w))
+        weighted = Topology(nodes=list(topology.nodes), edges=weighted_edges)
+        _, previous_nodes = dijkstra(weighted, start_node, target_node)
+        path = get_path(previous_nodes, target_node)
+
+        if not path or path[0] != start_node or path[-1] != target_node:
+            return []
+
+        return path
+
     def xi_shortest_path(self, topology: Topology, start_node: str, target_node: str) -> float:
         """
         Compute the entanglement rate for the shortest physical path.

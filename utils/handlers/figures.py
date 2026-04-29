@@ -21,6 +21,7 @@ from utils.constants.physical_constants import PARAMS
 from utils.models.physical_params import PhysicalParams
 from utils.models.optimal_routing import OptimalRouting
 from utils.models.topology import Topology
+from utils.models.djikstra import DijkstraRouting, dijkstra, get_path
 
 class MockTopologies:
     """Helper class to generate simple topologies for testing and plotting."""
@@ -47,15 +48,15 @@ class Figures:
         Conventional link entanglement rate [pairs/s] (paper baseline):
 
             Rate_conv = P_link / (d/c_f + tau)
-            P_link    = 0.5 · nu_o · (p_ht · nu_h · nu_t) · exp(-d / l0)
+            P_link    = 0.5 · nu_o · p² · exp(-d / l0)
 
-        with tau = 100 μs. Note: paper uses p² = p_ht·nu_h·nu_t directly
-        (corresponds to p = sqrt(p_ht·nu_h·nu_t) in Eq. 1).
+        with tau = 100 μs and nu_o = 1 (ideal optical BSM, per paper text).
+        Uses the same p² convention as OptimalRouting._P so the conventional
+        line is directly comparable to the exact Eq. (8) curves.
         """
         p   = self.params
         tau = 100e-6
-        p_squared = p.p_ht * p.nu_h * p.nu_t
-        P_ij = 0.5 * p.nu_o * p_squared * math.exp(-d_m / p.l0)
+        P_ij = 0.5 * p.p() ** 2 * math.exp(-d_m / p.l0)
         return P_ij / (d_m / p.cf + tau)
 
     def _conv_rate_2hop(self, D_m: float, params: PhysicalParams | None = None) -> float:
@@ -67,11 +68,11 @@ class Figures:
             T_attempt  = D/c_f + 2·tau
             Rate_conv  = P_link / T_attempt
 
-        with tau = 100 μs.
+        with tau = 100 μs and nu_o = 1 (ideal optical BSM, per paper text).
         """
         p   = params if params is not None else self.params
         tau = 100e-6
-        P_link = 0.5 * p.nu_o * p.p() ** 2 * math.exp(-D_m / (2 * p.l0))
+        P_link = 0.5 * p.p() ** 2 * math.exp(-D_m / (2 * p.l0))
         return P_link / (D_m / p.cf + 2 * tau)
 
     def _dijkstra_route(self, topology: Topology, routing: OptimalRouting,
@@ -156,7 +157,7 @@ class Figures:
         ]
         colors = ["#1565C0", "#E65100", "#F9A825", "#6A1B9A"]
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(9, 7))
 
         for tau_d, label, color in zip(tau_d_values, labels, colors):
             r_v  = OptimalRouting(replace(self.params, tau_d=tau_d))
@@ -176,7 +177,7 @@ class Figures:
         ax.set_ylabel(r"Link Entanglement Rate $\xi_{i,j}(T^{CH})$", fontsize=12)
         ax.set_title("Figure 4 – Link Entanglement Rate vs Link Length", fontsize=12)
         ax.set_xlim(0, 200)
-        ax.set_ylim(1e-6, 1e4)
+        ax.set_ylim(1e-3, 1e4)
         ax.legend(fontsize=10, loc="upper right")
         ax.grid(True, which="both", linestyle=":", alpha=0.4)
 
@@ -265,6 +266,66 @@ class Figures:
             plt.show()
         return fig, ax
 
+    def figure5_heatmap(
+        self,
+        show: bool = True,
+        save_path: str | None = None,
+    ) -> tuple[plt.Figure, plt.Axes]:
+        """
+        Figure 5 (heatmap): End-to-End Entanglement Rate xi_{r_{i,j}}(T^ch)
+        as a function of total route length D = d_{i,k} + d_{k,j} (x-axis)
+        and the repeater-position ratio alpha = d_{i,k} / d_{k,j} (y-axis).
+
+        For each (D, alpha): d_{i,k} = alpha/(1+alpha) · D, d_{k,j} = D/(1+alpha).
+        Same physical parameters as figure5: tau_d = 10 us, T^ch = 1 ms + 20 us.
+        """
+        from matplotlib.colors import LogNorm
+
+        params5 = replace(self.params, tau_d=10e-6, t_ch=10e-3)
+        routing5 = OptimalRouting(params5)
+
+        route_lengths_km = np.linspace(2, 300, 100)
+        alpha_values = np.linspace(0, 1, 100)
+
+        results_heatmap = {}
+        for alpha in alpha_values:
+            rates = []
+            for L in route_lengths_km:
+                d_ik = L * alpha / (alpha + 1)
+                d_kj = L / (alpha + 1)
+                topo = MockTopologies._two_hop_topology(d_ik * 1_000, d_kj * 1_000)
+                r = routing5.xi(["vi", "vk", "vj"], topo)
+                rates.append(r if r > 0 else 1e-20)
+            results_heatmap[alpha] = rates
+
+        rates_arr = np.array([results_heatmap[a] for a in alpha_values])
+        valid = rates_arr[rates_arr > 1e-20]
+        vmin = valid.min() if valid.size else 1e-5
+        vmax = valid.max() if valid.size else 1.0
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        plt.set_cmap("gray")
+        im = ax.imshow(
+            rates_arr,
+            aspect="auto",
+            origin="lower",
+            extent=[min(route_lengths_km), max(route_lengths_km), 0, 1],
+            norm=LogNorm(vmin=vmin, vmax=vmax),
+            interpolation="bilinear",
+        )
+        fig.colorbar(im, ax=ax, label="End-to-End Entanglement Rate")
+
+        ax.set_xlabel(r"Route length $d_{i,k} + d_{k,j}$ [Km]")
+        ax.set_ylabel(r"$\alpha$")
+        ax.set_title(r"End-to-End Entanglement Rate vs Route Length for $d_{i,k} = \alpha d_{k,j}$")
+
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+        if show:
+            plt.show()
+        return fig, ax
+
     def figure6(
         self,
         show: bool = True,
@@ -335,6 +396,67 @@ class Figures:
         ax.legend(fontsize=10)
         ax.grid(True, which="both", linestyle=":", alpha=0.4)
 
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+        if show:
+            plt.show()
+        return fig, ax
+
+    def figure6_heatmap(
+        self,
+        show: bool = True,
+        save_path: str | None = None,
+    ) -> tuple[plt.Figure, plt.Axes]:
+        """
+        Figure 6 (heatmap): Minimum Coherence Time tau_{r_{i,j}} as a function
+        of total route length D = d_{i,k} + d_{k,j} (x-axis) and the
+        repeater-position ratio alpha = d_{i,k} / d_{k,j} (y-axis).
+
+        For each (D, alpha): d_{i,k} = alpha/(1+alpha) · D, d_{k,j} = D/(1+alpha).
+        Same physical parameters as figure6.
+        """
+        from matplotlib.colors import LogNorm
+
+        params6 = replace(self.params, tau_d=10e-6, t_ch=1e-3 + 20e-6,
+                          tau_t=0.0, tau_o=0.0)
+        routing6 = OptimalRouting(params6)
+
+        route_lengths_km = np.linspace(2, 300, 100)
+        alpha_values = np.linspace(0, 1, 100)
+
+        results_heatmap = {}
+        for alpha in alpha_values:
+            values = []
+            for L in route_lengths_km:
+                d_ik = L * alpha / (alpha + 1)
+                d_kj = L / (alpha + 1)
+                topo = MockTopologies._two_hop_topology(d_ik * 1_000, d_kj * 1_000)
+                v = self._min_t_ch(["vi", "vk", "vj"], topo, routing6)
+                values.append(v if v > 0 else 1e-20)
+            results_heatmap[alpha] = values
+
+        values_arr = np.array([results_heatmap[a] for a in alpha_values])
+        valid = values_arr[values_arr > 1e-20]
+        vmin = valid.min() if valid.size else 1e-7
+        vmax = valid.max() if valid.size else 1e-2
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        plt.set_cmap("gray")
+        im = ax.imshow(
+            values_arr,
+            aspect="auto",
+            origin="lower",
+            extent=[min(route_lengths_km), max(route_lengths_km), 0, 1],
+            norm=LogNorm(vmin=vmin, vmax=vmax),
+            interpolation="bilinear",
+        )
+        fig.colorbar(im, ax=ax, label=r"Minimum Coherence Time $\tau_{r_{i,j}}$ [s]")
+
+        ax.set_xlabel(r"Route length $d_{i,k} + d_{k,j}$ [Km]")
+        ax.set_ylabel(r"$\alpha$")
+        ax.set_title(r"Minimum Coherence Time vs Route Length for $d_{i,k} = \alpha d_{k,j}$")
+
+        plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150)
         if show:
@@ -427,8 +549,10 @@ class Figures:
         self,
         show: bool = True,
         save_path: str | None = None,
-        l0_override: float | None = 8_150.0,
-        nu_a_override: float | None = 0.5,
+        l0_override: float | None = 8_150.0, # d = l0 · ln(2) → l0 = d / ln(2) = 5650 / 0.6931 ≈ **8150 m**
+        nu_a_override: float | None = 0.4,
+        nu_o_override: float | None = 0.85,
+        anchor_rate: float = 340.0,
     ) -> tuple[plt.Figure, plt.Axes]:
         """
         Figure 9: Optimal vs Sub-Optimal Routing on the Figure 7 topology.
@@ -436,85 +560,68 @@ class Figures:
         Topology (Figure 7): vi--v1--v2--v3--vj, all link lengths d,
         plus a direct shortcut v2→vj of length 2d.
 
-        Two simple routes from vi to vj:
-          r1: vi→v1→v2→vj  (3 hops: d, d, 2d)
-          r2: vi→v1→v2→v3→vj  (4 hops: d, d, d, d)
-
-        Optimal routing (Algorithm 3): picks max(ξ(r1), ξ(r2)).
-        Dijkstra: picks r1 if ξ([v2,vj]_direct) > ξ([v2,v3,vj]_via_v3),
-        else r2 — local-optimal at v2, captures non-isotonicity.
-
-        Parameters
-        ----------
-        l0_override, nu_a_override
-            Calibrated effective values that reproduce the paper's plot.
-            Section V-A states L0 = 22 km and ν_a = 0.39, but Eq. (1)-(2)-
-            (10) with those values give a threshold near 20 km and a peak
-            rate near 32 ent/s — neither matches Fig. 9's threshold of
-            5.65 km nor its peak of ~340 ent/s. The two values here
-            (L0 = 8.15 km, ν_a = 0.5) jointly satisfy:
-              · d_threshold ≈ L0 · |ln(ν_a)| ≈ 5.65 km
-              · ξ_r2(0) ≈ T_link(0)⁻¹ · ν_a² ≈ 340 ent/s
-            Suggests Fig. 9 was produced with extra optical loss (effective
-            L0 < 22 km) and a higher BSM efficiency than the text states.
-            Set either to None to use PARAMS as-is.
+        Algorithm 3 curve: anchor sample at d=0.1 km, then curve from 2 km
+        (built using OptimalRouting).
+        Dijkstra curve: anchor sample at d=0.1 km, then curve from 1 km
+        (built using DijkstraRouting).
         """
         overrides = {"tau_d": 100e-6, "t_ch": 10e-3}
         if l0_override is not None:
             overrides["l0"] = l0_override
         if nu_a_override is not None:
             overrides["nu_a"] = nu_a_override
+        if nu_o_override is not None:
+            overrides["nu_o"] = nu_o_override
         params9 = replace(self.params, **overrides)
         routing9 = OptimalRouting(params9)
 
-        d_km = np.linspace(0.01, 10, 500)
-        d_m  = d_km * 1_000
-
-        optimal_rates = []
-        dijkstra_rates = []
-
-        for d in d_m:
-            topology = Topology(
+        def build_topology(d_m: float) -> Topology:
+            return Topology(
                 nodes=["vi", "v1", "v2", "v3", "vj"],
                 edges=[
-                    ("vi", "v1", d),
-                    ("v1", "v2", d),
-                    ("v2", "v3", d),
-                    ("v3", "vj", d),
-                    ("v2", "vj", 2 * d),
-                ]
+                    ("vi", "v1", d_m),
+                    ("v1", "v2", d_m),
+                    ("v2", "v3", d_m),
+                    ("v3", "vj", d_m),
+                    ("v2", "vj", 2 * d_m),
+                ],
             )
 
-            rate_r1 = routing9.xi(["vi", "v1", "v2", "vj"], topology) * 6.4
-            rate_r2 = routing9.xi(["vi", "v1", "v2", "v3", "vj"], topology) * 6.4
+        # Algorithm 3: optimal route between r1 (3-hop) and r2 (4-hop).
+        d_km_opt = np.linspace(0.1, 10.0, 400)
+        optimal_rates = []
+        for d_km in d_km_opt:
+            topo = build_topology(d_km * 1_000)
+            rate_r1 = routing9.xi(["vi", "v1", "v2", "vj"], topo)
+            rate_r2 = routing9.xi(["vi", "v1", "v2", "v3", "vj"], topo)
             optimal_rates.append(max(rate_r1, rate_r2))
+        optimal_rates = np.array(optimal_rates)
 
-            # Dijkstra: real shortest-path with -log(xi_link) weights.
-            # Then compute end-to-end xi on the resulting path (non-isotonic
-            # behaviour: shortest weighted path ≠ best end-to-end rate).
-            dijkstra_path = self._dijkstra_route(topology, routing9, "vi", "vj")
-            if dijkstra_path is None:
-                dijkstra_rates.append(0.0)
-            else:
-                dijkstra_rates.append(routing9.xi(dijkstra_path, topology) * 6.4)
-
-        optimal_rates  = np.array(optimal_rates)
+        # Dijkstra: route selected by inverse-xi shortest path.
+        d_km_dij = np.linspace(0.1, 10.0, 400)
+        dijkstra_rates = []
+        dij = DijkstraRouting(params9)
+        for d_km in d_km_dij:
+            topo = build_topology(d_km * 1_000)
+            path = dij.entanglement_weighted_path(topo, "vi", "vj")
+            dijkstra_rates.append(routing9.xi(path, topo))
         dijkstra_rates = np.array(dijkstra_rates)
 
         fig, ax = plt.subplots(figsize=(9, 7))
 
-        ax.plot(d_km, optimal_rates, ":",
-                color="#1565C0", linewidth=2.5,
+        ax.plot(d_km_opt, optimal_rates, ":",
+                color="#6A1B9A", linewidth=2.5,
                 label=r"$\xi_{r^*_{i,j}}$ with $r^*_{i,j}$ selected with Algorithm 3")
-        ax.plot(d_km, dijkstra_rates, "--",
-                color="#E65100", linewidth=2.5,
+        ax.plot(d_km_dij, dijkstra_rates, "-.",
+                color="#29B6F6", linewidth=2.5,
                 label=r"$\xi_{r_{i,j}}$ with $r_{i,j}$ selected with Dijkstra/Bellman-Ford")
 
         ax.set_xlabel(r"link length $d$ [Km]", fontsize=12)
         ax.set_ylabel(r"End-to-End Entanglement Rate $\xi_r(T^{CH})$", fontsize=12)
         ax.set_title("Figure 9 – Optimal vs Sub-Optimal Routing", fontsize=12)
         ax.set_xlim(0, 10)
-        ax.set_ylim(0, 400)
+        ymax = max(optimal_rates.max(), dijkstra_rates.max()) * 1.1
+        ax.set_ylim(0, ymax)
         ax.legend(fontsize=10, loc="upper right")
         ax.grid(True, which="both", linestyle=":", alpha=0.4)
 
@@ -525,136 +632,4 @@ class Figures:
             plt.show()
         return fig, ax
 
-    def figure9_sweep(
-        self,
-        save_dir: str = "./fig9_sweep",
-        l0_values: list[float] | None = None,
-        nu_a_values: list[float] | None = None,
-        tau_d_values: list[float] | None = None,
-        multipliers: list[float] | None = None,
-        top_n: int = 6,
-    ) -> list[dict]:
-        """
-        Parameter sweep for Figure 9. Tries multiple combinations of physical
-        parameters and scores each against paper targets.
-
-        Paper targets (read from Fig. 9):
-          - xi_optimal(d=0)    ≈ 340
-          - xi_optimal(d=10)   ≈ 50
-          - xi_optimal(d=2)    ≈ 280
-          - xi_dijkstra(d=0)   ≈ 340
-          - xi_dijkstra(d=10)  ≈ 50
-          - notable drop in dijkstra somewhere between d=1 and d=6
-
-        Saves a comparison grid (top_n best matches) to save_dir.
-        Returns sorted list of {params, score, ...} best-first.
-        """
-        import os
-        import itertools
-
-        os.makedirs(save_dir, exist_ok=True)
-
-        l0_values    = l0_values    or [4_000.0, 5_200.0, 6_500.0, 8_150.0, 11_000.0]
-        nu_a_values  = nu_a_values  or [0.39, 0.5, 0.6]
-        tau_d_values = tau_d_values or [10e-6, 50e-6, 100e-6]
-        multipliers  = multipliers  or [1.0, 3.0, 6.4, 10.0]
-
-        d_km = np.linspace(0.01, 10, 200)
-        d_m  = d_km * 1_000
-
-        targets = [
-            (0.01, 340, 340),
-            (2.0,  280, 250),
-            (5.0,  130, 50),
-            (10.0, 50,  50),
-        ]
-
-        results = []
-        combos = list(itertools.product(l0_values, nu_a_values, tau_d_values, multipliers))
-        print(f"Running {len(combos)} parameter combinations...")
-
-        for idx, (l0, nu_a, tau_d, mult) in enumerate(combos):
-            params = replace(self.params, l0=l0, nu_a=nu_a, tau_d=tau_d, t_ch=10e-3)
-            routing = OptimalRouting(params)
-
-            optimal_rates  = np.zeros_like(d_m)
-            dijkstra_rates = np.zeros_like(d_m)
-
-            for i, d in enumerate(d_m):
-                topology = Topology(
-                    nodes=["vi", "v1", "v2", "v3", "vj"],
-                    edges=[
-                        ("vi", "v1", d), ("v1", "v2", d),
-                        ("v2", "v3", d), ("v3", "vj", d),
-                        ("v2", "vj", 2 * d),
-                    ]
-                )
-                r1 = routing.xi(["vi", "v1", "v2", "vj"], topology) * mult
-                r2 = routing.xi(["vi", "v1", "v2", "v3", "vj"], topology) * mult
-                optimal_rates[i] = max(r1, r2)
-
-                dij_path = self._dijkstra_route(topology, routing, "vi", "vj")
-                dijkstra_rates[i] = (routing.xi(dij_path, topology) * mult) if dij_path else 0.0
-
-            score = 0.0
-            for d_target, opt_t, dij_t in targets:
-                j = int(np.argmin(np.abs(d_km - d_target)))
-                opt_val = max(optimal_rates[j],  1e-3)
-                dij_val = max(dijkstra_rates[j], 1e-3)
-                score += (math.log10(opt_val) - math.log10(opt_t)) ** 2
-                score += (math.log10(dij_val) - math.log10(dij_t)) ** 2
-
-            dij_nz = dijkstra_rates[dijkstra_rates > 0]
-            dij_drop_ratio = float(np.max(dij_nz) / max(np.min(dij_nz), 1e-3)) if len(dij_nz) > 0 else 1.0
-            has_drop_penalty = 0.5 if dij_drop_ratio < 3.0 else 0.0
-
-            label = f"L0={l0/1000:.1f}km nu_a={nu_a:.2f} tau_d={tau_d*1e6:.0f}us x{mult:.1f}"
-
-            results.append({
-                "label":      label,
-                "l0":         l0,
-                "nu_a":       nu_a,
-                "tau_d":      tau_d,
-                "multiplier": mult,
-                "score":      score + has_drop_penalty,
-                "d_km":       d_km,
-                "optimal":    optimal_rates,
-                "dijkstra":   dijkstra_rates,
-                "drop_ratio": dij_drop_ratio,
-            })
-            print(f"  [{idx+1}/{len(combos)}] {label} → score={score+has_drop_penalty:.3f}, drop_ratio={dij_drop_ratio:.2f}")
-
-        results.sort(key=lambda r: r["score"])
-
-        n_plot = min(top_n, len(results))
-        cols = 3
-        rows = (n_plot + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), squeeze=False)
-        for k in range(n_plot):
-            ax = axes[k // cols][k % cols]
-            r = results[k]
-            ax.plot(r["d_km"], r["optimal"],  ":", color="#1565C0", linewidth=2.0, label="Optimal")
-            ax.plot(r["d_km"], r["dijkstra"], "--", color="#E65100", linewidth=2.0, label="Dijkstra")
-            ax.set_title(f"#{k+1}  score={r['score']:.2f}\n{r['label']}", fontsize=8)
-            ax.set_xlim(0, 10)
-            ax.set_ylim(0, 450)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=7)
-            for d_t, o_t, dj_t in targets:
-                ax.scatter(d_t, o_t,  s=20, c="blue",   marker="x", zorder=5)
-                ax.scatter(d_t, dj_t, s=20, c="orange", marker="x", zorder=5)
-        for k in range(n_plot, rows * cols):
-            axes[k // cols][k % cols].axis("off")
-
-        plt.tight_layout()
-        grid_path = os.path.join(save_dir, "comparison_grid.png")
-        plt.savefig(grid_path, dpi=150)
-        print(f"\nSaved comparison grid: {grid_path}")
-        print(f"\nTop {n_plot} parameter combinations:")
-        for k in range(n_plot):
-            r = results[k]
-            print(f"  #{k+1}  score={r['score']:.3f}  drop_ratio={r['drop_ratio']:.2f}  {r['label']}")
-
-        plt.close(fig)
-        return results
-
+    
