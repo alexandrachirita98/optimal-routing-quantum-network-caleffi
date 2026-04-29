@@ -1,0 +1,7 @@
+services:
+  figures:
+    build: .
+    container_name: qit-figures
+    volumes:
+      - ./images:/app/images
+    command: python generate_figures.py
