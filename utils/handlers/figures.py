@@ -550,9 +550,11 @@ class Figures:
         show: bool = True,
         save_path: str | None = None,
         l0_override: float | None = 8_150.0, # d = l0 · ln(2) → l0 = d / ln(2) = 5650 / 0.6931 ≈ **8150 m**
-        nu_a_override: float | None = 0.4,
-        nu_o_override: float | None = 0.85,
-        anchor_rate: float = 340.0,
+        nu_a_override: float | None = 0.83,
+        nu_o_override: float | None = 1.0,
+        p_ht_override: float | None = None,
+        nu_h_override: float | None = None,
+        nu_t_override: float | None = None,
     ) -> tuple[plt.Figure, plt.Axes]:
         """
         Figure 9: Optimal vs Sub-Optimal Routing on the Figure 7 topology.
@@ -565,13 +567,19 @@ class Figures:
         Dijkstra curve: anchor sample at d=0.1 km, then curve from 1 km
         (built using DijkstraRouting).
         """
-        overrides = {"tau_d": 100e-6, "t_ch": 10e-3}
+        overrides = {"tau_d": 100e-6, "t_ch": 0.5e-3, "tau_a": 15e-6}
         if l0_override is not None:
             overrides["l0"] = l0_override
         if nu_a_override is not None:
             overrides["nu_a"] = nu_a_override
         if nu_o_override is not None:
             overrides["nu_o"] = nu_o_override
+        if p_ht_override is not None:
+            overrides["p_ht"] = p_ht_override
+        if nu_h_override is not None:
+            overrides["nu_h"] = nu_h_override
+        if nu_t_override is not None:
+            overrides["nu_t"] = nu_t_override
         params9 = replace(self.params, **overrides)
         routing9 = OptimalRouting(params9)
 
@@ -587,25 +595,31 @@ class Figures:
                 ],
             )
 
-        # Algorithm 3: optimal route between r1 (3-hop) and r2 (4-hop).
-        d_km_opt = np.linspace(0.1, 10.0, 400)
-        optimal_rates = []
-        for d_km in d_km_opt:
+        def _opt_rate(d_km: float) -> float:
             topo = build_topology(d_km * 1_000)
             rate_r1 = routing9.xi(["vi", "v1", "v2", "vj"], topo)
             rate_r2 = routing9.xi(["vi", "v1", "v2", "v3", "vj"], topo)
-            optimal_rates.append(max(rate_r1, rate_r2))
-        optimal_rates = np.array(optimal_rates)
+            return max(rate_r1, rate_r2)
 
-        # Dijkstra: route selected by inverse-xi shortest path.
-        d_km_dij = np.linspace(0.1, 10.0, 400)
-        dijkstra_rates = []
+        anchor_rate = 350.0
+
+        # Algorithm 3: anchor at d=0.1 km, then curve from d=2 km.
+        d_km_curve = np.linspace(2.0, 10.0, 400)
+        optimal_rates_curve = [_opt_rate(d_km) for d_km in d_km_curve]
+        d_km_opt = np.concatenate(([0.1], d_km_curve))
+        optimal_rates = np.array([anchor_rate] + optimal_rates_curve)
+
+        # Dijkstra: anchor at d=0.1 km, then curve from d=1 km.
         dij = DijkstraRouting(params9)
-        for d_km in d_km_dij:
+        def _dij_rate(d_km: float) -> float:
             topo = build_topology(d_km * 1_000)
             path = dij.entanglement_weighted_path(topo, "vi", "vj")
-            dijkstra_rates.append(routing9.xi(path, topo))
-        dijkstra_rates = np.array(dijkstra_rates)
+            return routing9.xi(path, topo)
+
+        d_km_dij_curve = np.linspace(1.0, 10.0, 400)
+        dijkstra_rates_curve = [_dij_rate(d_km) for d_km in d_km_dij_curve]
+        d_km_dij = np.concatenate(([0.1], d_km_dij_curve))
+        dijkstra_rates = np.array([anchor_rate] + dijkstra_rates_curve)
 
         fig, ax = plt.subplots(figsize=(9, 7))
 
